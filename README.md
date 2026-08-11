@@ -1,8 +1,13 @@
 # cc-crawl4ai
 
-[![License: MIT](https://img.shields.io/github/license/romek-rozen/cc-crawl4ai)](LICENSE)
+[![GitHub release](https://img.shields.io/badge/version-0.1.1-blue)](https://github.com/romek-rozen/cc-crawl4ai)
+[![GitHub license](https://img.shields.io/github/license/romek-rozen/cc-crawl4ai)](LICENSE)
+[![Built with Crawl4AI](https://img.shields.io/badge/Built%20with-Crawl4AI-blue)](https://github.com/unclecode/crawl4ai)
+[![Built with Trafilatura](https://img.shields.io/badge/Built%20with-Trafilatura-orange)](https://github.com/adbar/trafilatura)
+[![Built for Claude Code](https://img.shields.io/badge/Built%20for-Claude%20Code-D97757)](https://github.com/anthropics/claude-code)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=githubsponsors)](https://github.com/sponsors/romek-rozen)
 
-A native Claude Code plugin for crawling live websites with [Crawl4AI](https://github.com/unclecode/crawl4ai) and extracting compact Markdown or text with [Trafilatura](https://trafilatura.readthedocs.io/).
+A native [Claude Code](https://github.com/anthropics/claude-code) plugin for crawling live websites with [Crawl4AI](https://github.com/unclecode/crawl4ai) and extracting compact Markdown or text with [Trafilatura](https://trafilatura.readthedocs.io/).
 
 `cc-crawl4ai` gives Claude Code one crawling skill, four runtime-management skills, three specialized agents, and a bundled Python command-line runner. It is deliberately **not an MCP server**: Claude invokes a local executable through Bash, and the executable launches pinned Crawl4AI and Trafilatura tools without a shell.
 
@@ -168,7 +173,7 @@ Please report vulnerabilities privately as described in that manual rather than 
 
 ## Support
 
-If this project helps you, GitHub Sponsors and Patreon links are configured in [`.github/FUNDING.yml`](.github/FUNDING.yml).
+If this project helps you, you can support its development through [GitHub Sponsors](https://github.com/sponsors/romek-rozen) or [Patreon](https://www.patreon.com/RomanRozenberger). Funding links are also configured in [`.github/FUNDING.yml`](.github/FUNDING.yml).
 
 ## License
 
