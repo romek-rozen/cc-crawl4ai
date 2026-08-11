@@ -1,0 +1,20 @@
+{
+  "name": "cc-crawl4ai-marketplace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Marketplace and non-MCP Crawl4AI plugin for Claude Code",
+  "scripts": {
+    "test": "python3 -m unittest discover -s plugins/cc-crawl4ai/tests -v",
+    "validate:json": "python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && python3 -m json.tool plugins/cc-crawl4ai/.claude-plugin/plugin.json >/dev/null",
+    "validate": "npm run validate:json && npm test"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Roman Rozenberger",
+    "url": "https://rozenberger.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/romek-rozen/cc-crawl4ai.git"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "cc-crawl4ai",
+  "displayName": "Crawl4AI",
+  "version": "0.1.0",
+  "description": "Crawl websites and extract token-efficient content with Crawl4AI and Trafilatura",
+  "author": {
+    "name": "Roman Rozenberger",
+    "url": "https://rozenberger.com"
+  },
+  "homepage": "https://github.com/romek-rozen/cc-crawl4ai",
+  "repository": "https://github.com/romek-rozen/cc-crawl4ai",
+  "license": "MIT",
+  "keywords": ["crawl4ai", "trafilatura", "web-crawling", "scraping", "extraction"]
+}

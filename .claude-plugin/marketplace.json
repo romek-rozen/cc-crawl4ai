@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "romek-plugins",
+  "description": "Claude Code plugins by Roman Rozenberger",
+  "owner": {
+    "name": "Roman Rozenberger",
+    "url": "https://rozenberger.com"
+  },
+  "plugins": [
+    {
+      "name": "cc-crawl4ai",
+      "source": "./plugins/cc-crawl4ai",
+      "description": "Crawl4AI and Trafilatura workflows for Claude Code",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,0 +1,1036 @@
+#!/usr/bin/env python3
+"""Standalone, non-MCP Crawl4AI runner for the cc-crawl4ai Claude Code plugin."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import IO
+from urllib.parse import urljoin, urlparse
+
+VERSION = "0.1.0"
+MAX_DIAGNOSTIC_BYTES = 64 * 1024
+PROBE_TIMEOUT = 10
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+REQUIREMENTS_DIR = PLUGIN_ROOT / "requirements"
+RUNTIME_STATE = ".runtime-state.json"
+BROWSER_MARKER = ".browser-ready.json"
+_ACTIVE_PROCESS: subprocess.Popen[bytes] | None = None
+WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+class CliError(RuntimeError):
+    pass
+
+
+def _bin_dir(venv: Path) -> Path:
+    return venv / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _exe(venv: Path, name: str) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return _bin_dir(venv) / f"{name}{suffix}"
+
+
+def _runtime_candidates(project: Path, explicit: str | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    if os.environ.get("CRAWL4AI_RUNTIME"):
+        candidates.append(Path(os.environ["CRAWL4AI_RUNTIME"]).expanduser())
+    if os.environ.get("CLAUDE_PLUGIN_DATA"):
+        candidates.append(Path(os.environ["CLAUDE_PLUGIN_DATA"]).expanduser())
+    candidates.extend(
+        [
+            project / ".crawl4ai" / "runtime",
+            Path.home() / ".claude" / "crawl4ai",
+        ]
+    )
+    seen: set[Path] = set()
+    return [
+        p.resolve()
+        for p in candidates
+        if not (p.resolve() in seen or seen.add(p.resolve()))
+    ]
+
+
+def _resolve_tools(
+    project: Path, runtime: str | None = None
+) -> tuple[Path | None, Path | None, Path | None]:
+    if os.environ.get("CRAWL4AI_VENV"):
+        root = Path(os.environ["CRAWL4AI_VENV"]).expanduser().resolve()
+        crwl = _exe(root, "crwl")
+        traf_root = (
+            Path(os.environ.get("TRAFILATURA_VENV", "")).expanduser().resolve()
+            if os.environ.get("TRAFILATURA_VENV")
+            else None
+        )
+        traf = _exe(traf_root, "trafilatura") if traf_root else None
+        if crwl.exists():
+            return crwl, traf if traf and traf.exists() else None, root.parent
+    for root in _runtime_candidates(project, runtime):
+        crwl = _exe(root / ".venv", "crwl")
+        traf = _exe(root / ".trafilatura-venv", "trafilatura")
+        if crwl.exists():
+            return crwl, traf if traf.exists() else None, root
+    crwl_path = shutil.which("crwl")
+    traf_path = shutil.which("trafilatura")
+    return (
+        Path(crwl_path).resolve() if crwl_path else None,
+        Path(traf_path).resolve() if traf_path else None,
+        None,
+    )
+
+
+def _probe_executable(
+    executable: Path | None,
+    arguments: list[str],
+    project: Path,
+    timeout: int = PROBE_TIMEOUT,
+) -> tuple[bool, str]:
+    """Execute a bounded health probe instead of trusting path existence."""
+    if not executable or not executable.is_file():
+        return False, "missing"
+    try:
+        code, out, err = _run(
+            [str(executable), *arguments],
+            cwd=project,
+            timeout=timeout,
+            env=_process_env(executable, project),
+        )
+    except (CliError, OSError) as exc:
+        return False, str(exc)
+    diagnostic = (out or err).decode(errors="replace").strip()
+    return code == 0, diagnostic[:1000] or f"exit code {code}"
+
+
+def _package_version(executable: Path, distribution: str, project: Path) -> str | None:
+    python = _exe(executable.parent.parent, "python")
+    if not python.is_file():
+        return None
+    try:
+        code, out, _ = _run(
+            [
+                str(python),
+                "-c",
+                "import importlib.metadata as m; print(m.version(__import__('sys').argv[1]))",
+                distribution,
+            ],
+            cwd=project,
+            timeout=PROBE_TIMEOUT,
+            env=_process_env(python, project),
+        )
+    except (CliError, OSError):
+        return None
+    return out.decode(errors="replace").strip() if code == 0 else None
+
+
+def _runtime_identity(crwl: Path, traf: Path, project: Path) -> dict[str, str]:
+    payload = {
+        "crwl_path": str(crwl.resolve()),
+        "trafilatura_path": str(traf.resolve()),
+        "crawl4ai_version": _package_version(crwl, "crawl4ai", project) or "unknown",
+        "trafilatura_version": _package_version(traf, "trafilatura", project)
+        or "unknown",
+    }
+    payload["fingerprint"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode()
+    ).hexdigest()
+    return payload
+
+
+def _read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_runtime_state(root: Path, identity: dict[str, str]) -> None:
+    requirements = {}
+    for name in ("crawl4ai", "trafilatura"):
+        path = REQUIREMENTS_DIR / f"{name}.txt"
+        requirements[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    state: dict[str, object] = {
+        **identity,
+        "requirements_sha256": requirements,
+        "installed_at": datetime.now().astimezone().isoformat(),
+    }
+    _write_json_atomic(root / RUNTIME_STATE, state)
+
+
+def _write_browser_marker(root: Path, identity: dict[str, str]) -> None:
+    marker = {
+        "verified_at": datetime.now().astimezone().isoformat(),
+        "runtime_fingerprint": identity["fingerprint"],
+    }
+    _write_json_atomic(root / BROWSER_MARKER, marker)
+
+
+def _browser_verification(root: Path, identity: dict[str, str]) -> str | None:
+    marker = _read_json_object(root / BROWSER_MARKER)
+    if not marker or marker.get("runtime_fingerprint") != identity["fingerprint"]:
+        return None
+    verified_at = marker.get("verified_at")
+    return verified_at if isinstance(verified_at, str) else None
+
+
+def _process_env(executable: Path, project: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(executable.parent.parent)
+    env["PATH"] = str(executable.parent) + os.pathsep + env.get("PATH", "")
+    env.setdefault("CRAWL4_AI_BASE_DIRECTORY", str(project))
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
+def _terminate_active(signum: int, _frame: object) -> None:
+    proc = _ACTIVE_PROCESS
+    if proc and proc.poll() is None:
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
+    raise KeyboardInterrupt(f"interrupted by signal {signum}")
+
+
+def _run(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    stdin: bytes | None = None,
+    stdout: IO[bytes] | int = subprocess.PIPE,
+    stderr: IO[bytes] | int = subprocess.PIPE,
+) -> tuple[int, bytes, bytes]:
+    """Run argv without a shell, with timeout and process-group cancellation."""
+    global _ACTIVE_PROCESS
+    kwargs: dict[str, object] = {
+        "cwd": str(cwd),
+        "env": env,
+        "stdin": subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(argv, **kwargs)  # type: ignore[arg-type]
+    _ACTIVE_PROCESS = proc
+    try:
+        out, err = proc.communicate(input=stdin, timeout=timeout)
+        return proc.returncode, out or b"", err or b""
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+            proc.communicate()
+        raise CliError(f"process timed out after {timeout}s: {Path(argv[0]).name}")
+    finally:
+        _ACTIVE_PROCESS = None
+
+
+def _read_bounded(path: Path, limit: int = MAX_DIAGNOSTIC_BYTES) -> str:
+    with path.open("rb") as handle:
+        data = handle.read(limit + 1)
+    text = data[:limit].decode("utf-8", errors="replace")
+    return text + ("\n… (truncated)" if len(data) > limit else "")
+
+
+def _validate_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise CliError("URL must be an absolute http:// or https:// URL")
+
+
+def _slug(value: str, fallback: str = "item") -> str:
+    value = value.encode("ascii", "ignore").decode().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value or fallback
+
+
+def _artifact_path(
+    project: Path, url: str, output_format: str, extractor: str | None
+) -> Path:
+    parsed = urlparse(url)
+    domain = re.sub(r"^www\.", "", parsed.hostname or "unknown-domain")
+    domain = re.sub(r"[^a-z0-9.-]+", "-", domain.lower()).strip("-") or "unknown-domain"
+    url_slug = _slug((parsed.path.strip("/") + "-" + parsed.query).strip("-"), "home")
+    timestamp = datetime.now().astimezone().strftime("%Y-%m-%d-%H-%M-%S")
+    if extractor == "trafilatura":
+        folder, extension = "trafilatura", "txt" if output_format == "text" else "md"
+    else:
+        normalized = {"md": "markdown", "md-fit": "markdown-fit"}.get(
+            output_format, output_format
+        )
+        folder = normalized
+        extension = "json" if normalized in ("json", "all") else "md"
+    return (
+        project
+        / ".crawl4ai"
+        / "outputs"
+        / domain
+        / folder
+        / f"{timestamp}-{url_slug}.{extension}"
+    )
+
+
+def _unique(path: Path) -> Path:
+    if not path.exists():
+        return path
+    digest = hashlib.sha1(str(path).encode()).hexdigest()[:6]
+    counter = 1
+    while True:
+        suffix = f"-{digest}" if counter == 1 else f"-{digest}-{counter}"
+        candidate = path.with_name(f"{path.stem}{suffix}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def _tokenize(value: str) -> list[str]:
+    return WORD_RE.findall(value.casefold())
+
+
+def split_structural_chunks(content: str, output_format: str = "markdown") -> list[str]:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    blocks = [
+        part.strip() for part in re.split(r"\n\s*\n+", normalized) if part.strip()
+    ]
+    if output_format == "text":
+        return blocks
+    chunks: list[str] = []
+    section: list[str] = []
+    for block in blocks:
+        if re.search(r"^#{1,6}\s", block, re.MULTILINE) and section:
+            chunks.append("\n\n".join(section))
+            section = [block]
+        else:
+            section.append(block)
+    if section:
+        chunks.append("\n\n".join(section))
+    return chunks
+
+
+def filter_bm25(
+    content: str, query: str, threshold: float = 1.0, output_format: str = "markdown"
+) -> tuple[str, int, int]:
+    chunks = split_structural_chunks(content, output_format)
+    terms = list(dict.fromkeys(_tokenize(query)))
+    if not chunks or not terms:
+        return "", 0, len(chunks)
+    docs = [_tokenize(chunk) for chunk in chunks]
+    avg_len = sum(map(len, docs)) / len(docs) or 1
+    dfs = {term: sum(term in doc for doc in docs) for term in terms}
+    selected: list[str] = []
+    for chunk, doc in zip(chunks, docs):
+        frequencies = {term: doc.count(term) for term in terms}
+        score = 0.0
+        for term in terms:
+            freq = frequencies[term]
+            if not freq:
+                continue
+            ident = math.log(1 + (len(docs) - dfs[term] + 0.5) / (dfs[term] + 0.5))
+            score += (
+                ident * freq * 2.5 / (freq + 1.5 * (0.25 + 0.75 * len(doc) / avg_len))
+            )
+        if score >= threshold:
+            selected.append(chunk)
+    return "\n\n".join(selected), len(selected), len(chunks)
+
+
+def _validate_crawl(args: argparse.Namespace) -> None:
+    _validate_url(args.url)
+    if args.timeout < 1 or args.timeout > 86400:
+        raise CliError("--timeout must be between 1 and 86400 seconds")
+    if args.max_pages is not None and args.max_pages < 1:
+        raise CliError("--max-pages must be at least 1")
+    if args.bm25_threshold < 0:
+        raise CliError("--bm25-threshold must be non-negative")
+    if args.extractor == "trafilatura":
+        if (
+            args.deep_crawl
+            or args.question
+            or args.json_extract
+            or args.schema_path
+            or args.extraction_config
+        ):
+            raise CliError(
+                "Trafilatura is single-page only and cannot be combined with deep crawl, question, or JSON extraction"
+            )
+        if args.output_format not in ("markdown", "md", "text"):
+            raise CliError("Trafilatura supports only markdown, md, or text output")
+        if args.output_format == "text" and (
+            args.include_links or args.include_formatting
+        ):
+            raise CliError(
+                "links and formatting require Trafilatura Markdown output, not text"
+            )
+    else:
+        if args.output_format == "text":
+            raise CliError("text output requires --extractor trafilatura")
+        if (
+            args.include_links
+            or args.include_images
+            or args.no_tables
+            or args.include_formatting is not None
+        ):
+            raise CliError(
+                "Trafilatura formatting options require --extractor trafilatura"
+            )
+    if args.bm25_query is not None and not args.bm25_query.strip():
+        raise CliError("--bm25-query must not be empty")
+    if args.bm25_query:
+        if args.deep_crawl or args.question or args.json_extract or args.schema_path:
+            raise CliError(
+                "BM25 is for single-page Markdown/text and cannot be combined with deep crawl, question, or extraction"
+            )
+        if args.output_format not in (
+            "markdown",
+            "md",
+            "markdown-fit",
+            "md-fit",
+            "text",
+        ):
+            raise CliError("BM25 requires Markdown or text output")
+    if bool(args.schema_path) != bool(args.extraction_config):
+        raise CliError(
+            "--schema-path and --extraction-config must be provided together"
+        )
+    if args.json_extract and args.schema_path:
+        raise CliError(
+            "choose either --json-extract or schema/config extraction, not both"
+        )
+    if args.question and (args.json_extract or args.schema_path):
+        raise CliError("question mode cannot be combined with structured extraction")
+    if args.output_format == "json" and not (
+        args.json_extract or (args.schema_path and args.extraction_config)
+    ):
+        raise CliError(
+            "JSON output requires --json-extract or both --schema-path and --extraction-config"
+        )
+    if args.deep_crawl and (args.question or args.json_extract or args.schema_path):
+        raise CliError(
+            "deep crawl cannot be combined with question mode or structured extraction"
+        )
+    if args.deep_crawl and args.output_format not in (
+        "markdown",
+        "md",
+        "markdown-fit",
+        "md-fit",
+        "all",
+    ):
+        raise CliError("deep crawl supports Markdown or all output")
+    if args.deep_crawl and not args.max_pages:
+        raise CliError("deep crawl requires an explicit --max-pages limit")
+
+
+def _build_crwl_args(args: argparse.Namespace, direct_output: Path | None) -> list[str]:
+    values = ["crawl"]
+    values += ["-o", "all" if args.extractor == "trafilatura" else args.output_format]
+    pairs = [
+        ("--deep-crawl", args.deep_crawl),
+        ("--max-pages", args.max_pages),
+        ("-q", args.question),
+        ("-j", args.json_extract),
+        ("-s", args.schema_path),
+        ("-e", args.extraction_config),
+        ("-b", args.browser_config),
+    ]
+    for flag, value in pairs:
+        if value is not None:
+            values += [flag, str(value)]
+    if args.bypass_cache:
+        values.append("--bypass-cache")
+    else:
+        config = args.crawler_config or ""
+        if "cache_mode=" not in config:
+            config = f"{config},cache_mode=enabled".strip(",")
+        values += ["-c", config]
+    if direct_output:
+        values += ["-O", str(direct_output)]
+    values.append(args.url)
+    return values
+
+
+def append_image_references(
+    content: str, images: list[dict[str, object]], page_url: str, output_format: str
+) -> str:
+    existing = set(re.findall(r"!\[[^\]]*\]\(([^)\s]+)", content))
+    references: list[str] = []
+    seen: set[str] = set()
+    for image in images:
+        source_value = image.get("src")
+        if not isinstance(source_value, str) or not source_value.strip():
+            continue
+        source = urljoin(page_url, source_value.strip())
+        if source in seen or source in existing or source_value in existing:
+            continue
+        seen.add(source)
+        alt_value = image.get("alt")
+        alt = (
+            alt_value.strip()
+            if isinstance(alt_value, str) and alt_value.strip()
+            else "Image"
+        )
+        references.append(
+            f"![{alt}]({source})"
+            if output_format == "markdown"
+            else f"Image: {alt} — {source}"
+        )
+    return content.rstrip() + ("\n\n" + "\n".join(references) if references else "")
+
+
+def _markdown_tables(markdown: str) -> list[str]:
+    lines = markdown.splitlines()
+    tables: list[str] = []
+    index = 0
+    separator = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+    while index < len(lines):
+        if "|" not in lines[index]:
+            index += 1
+            continue
+        block: list[str] = []
+        while index < len(lines) and "|" in lines[index]:
+            block.append(lines[index].rstrip())
+            index += 1
+        if len(block) >= 2 and any(separator.match(line) for line in block):
+            tables.append("\n".join(block))
+    return tables
+
+
+def _table_rows(table: str) -> list[list[str]]:
+    return [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in table.splitlines()
+        if not re.match(r"^\s*\|?\s*:?-{3,}", line)
+    ]
+
+
+def append_markdown_tables(
+    content: str, crawl_markdown: str, output_format: str
+) -> str:
+    tables = _markdown_tables(crawl_markdown)
+    if not tables:
+        return content
+    existing = {
+        "\x1f".join(cell for row in _table_rows(table) for cell in row)
+        for table in _markdown_tables(content)
+    }
+    restored = content
+    append: list[str] = []
+    for table in tables:
+        rows = _table_rows(table)
+        signature = "\x1f".join(cell for row in rows for cell in row)
+        if signature in existing:
+            continue
+        flattened = "\n".join(cell for row in rows for cell in row)
+        rendered = (
+            table
+            if output_format == "markdown"
+            else "\n".join("\t".join(row) for row in rows)
+        )
+        if flattened and flattened in restored:
+            restored = restored.replace(flattened, rendered, 1)
+        else:
+            append.append(rendered)
+    return restored.rstrip() + ("\n\n" + "\n\n".join(append) if append else "")
+
+
+def _extract_trafilatura(
+    crawl_json: Path,
+    trafilatura: Path,
+    args: argparse.Namespace,
+    project: Path,
+    output: Path,
+) -> tuple[Path, Path, tuple[int, int] | None]:
+    try:
+        with crawl_json.open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise CliError(
+            f"Crawl4AI did not return valid JSON containing raw HTML: {exc}"
+        ) from exc
+    if isinstance(document, list):
+        raise CliError("Trafilatura supports a single page only")
+    html = document.get("html") if isinstance(document, dict) else None
+    if not isinstance(html, str) or not html.strip():
+        raise CliError("Crawl4AI returned no raw HTML for Trafilatura")
+    raw_path = output.with_name(output.stem + ".raw.html")
+    raw_path.write_text(html, encoding="utf-8")
+    traf_args = [
+        str(trafilatura),
+        "--output-format",
+        "txt" if args.output_format == "text" else "markdown",
+    ]
+    if args.include_links:
+        traf_args.append("--links")
+    if args.include_formatting or (
+        args.include_formatting is None and args.output_format != "text"
+    ):
+        traf_args.append("--formatting")
+    if args.include_images:
+        traf_args.append("--images")
+    if args.no_tables:
+        traf_args.append("--no-tables")
+    with (
+        tempfile.NamedTemporaryFile() as stdout_file,
+        tempfile.NamedTemporaryFile() as stderr_file,
+    ):
+        code, _, _ = _run(
+            traf_args,
+            cwd=project,
+            timeout=args.timeout,
+            env=_process_env(trafilatura, project),
+            stdin=html.encode(),
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+        stdout_file.flush()
+        stderr_file.flush()
+        if code != 0:
+            raise CliError(
+                f"Trafilatura exited with code {code}: {_read_bounded(Path(stderr_file.name))}"
+            )
+        content = Path(stdout_file.name).read_text(encoding="utf-8")
+    if not content.strip():
+        raise CliError(
+            f"Trafilatura returned no extractable content; raw HTML saved to {raw_path}"
+        )
+    render_format = "text" if args.output_format == "text" else "markdown"
+    media = document.get("media", {}) if isinstance(document, dict) else {}
+    images = media.get("images", []) if isinstance(media, dict) else []
+    markdown = document.get("markdown", {}) if isinstance(document, dict) else {}
+    crawl_markdown = (
+        markdown.get("raw_markdown", "") if isinstance(markdown, dict) else ""
+    )
+    if args.include_images and isinstance(images, list):
+        content = append_image_references(content, images, args.url, render_format)
+    if not args.no_tables and isinstance(crawl_markdown, str):
+        content = append_markdown_tables(content, crawl_markdown, render_format)
+    stats = None
+    if args.bm25_query:
+        content, matched, total = filter_bm25(
+            content,
+            args.bm25_query,
+            args.bm25_threshold,
+            "text" if args.output_format == "text" else "markdown",
+        )
+        stats = (matched, total)
+    output.write_text(content, encoding="utf-8")
+    return output, raw_path, stats
+
+
+def cmd_crawl(args: argparse.Namespace) -> int:
+    _validate_crawl(args)
+    project = (
+        Path(args.project_root or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+        .expanduser()
+        .resolve()
+    )
+    if not project.is_dir():
+        raise CliError(f"project root does not exist: {project}")
+    crwl, trafilatura, _ = _resolve_tools(project, args.runtime_root)
+    if not crwl:
+        raise CliError("Crawl4AI is not installed. Run /cc-crawl4ai:crawl4ai-install")
+    if args.extractor == "trafilatura" and not trafilatura:
+        raise CliError(
+            "Trafilatura is not installed. Run /cc-crawl4ai:crawl4ai-install"
+        )
+    output = (
+        Path(args.output_file).expanduser()
+        if args.output_file
+        else _artifact_path(project, args.url, args.output_format, args.extractor)
+    )
+    if not output.is_absolute():
+        output = (project / output).resolve()
+    output = _unique(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    direct_output = (
+        output
+        if not args.extractor and not args.question and not args.bm25_query
+        else None
+    )
+    crwl_args = [str(crwl), *_build_crwl_args(args, direct_output)]
+    with (
+        tempfile.NamedTemporaryFile() as stdout_file,
+        tempfile.NamedTemporaryFile() as stderr_file,
+    ):
+        code, _, _ = _run(
+            crwl_args,
+            cwd=project,
+            timeout=args.timeout,
+            env=_process_env(crwl, project),
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+        stdout_file.flush()
+        stderr_file.flush()
+        if code != 0:
+            raise CliError(
+                f"Crawl4AI exited with code {code}.\n{_read_bounded(Path(stderr_file.name))}\n{_read_bounded(Path(stdout_file.name), 4096)}"
+            )
+        if direct_output:
+            if not output.exists():
+                # Some versions still emit stdout despite -O.
+                shutil.copyfile(stdout_file.name, output)
+            if not output.exists() or output.stat().st_size == 0:
+                raise CliError("crawl succeeded but produced no content")
+            print(f"[crawl4ai] Full output saved to: {output}")
+            return 0
+        if args.extractor:
+            extracted, raw, stats = _extract_trafilatura(
+                Path(stdout_file.name), trafilatura, args, project, output
+            )  # type: ignore[arg-type]
+            print("[crawl4ai] Crawl + Trafilatura extraction complete.")
+            print(f"[crawl4ai] Extracted output: {extracted}")
+            print(f"[crawl4ai] Raw HTML: {raw}")
+            if stats:
+                print(
+                    f"[crawl4ai] BM25 retained {stats[0]}/{stats[1]} structural chunks."
+                )
+            return 0
+        content = Path(stdout_file.name).read_text(encoding="utf-8")
+    if not content.strip():
+        raise CliError("crawl succeeded but produced no content")
+    if args.bm25_query:
+        content, matched, total = filter_bm25(
+            content,
+            args.bm25_query,
+            args.bm25_threshold,
+            "text" if args.output_format == "text" else "markdown",
+        )
+        print(f"[crawl4ai] BM25 retained {matched}/{total} structural chunks.")
+    output.write_text(content, encoding="utf-8")
+    print(f"[crawl4ai] Full output saved to: {output}")
+    return 0
+
+
+def _install_root(scope: str, project: Path, custom: str | None) -> Path:
+    if scope == "project":
+        return (project / ".crawl4ai" / "runtime").resolve()
+    if scope == "custom":
+        if not custom:
+            raise CliError("custom scope requires --directory")
+        return Path(custom).expanduser().resolve()
+    if os.environ.get("CLAUDE_PLUGIN_DATA"):
+        return Path(os.environ["CLAUDE_PLUGIN_DATA"]).expanduser().resolve()
+    return (Path.home() / ".claude" / "crawl4ai").resolve()
+
+
+def _run_visible(argv: list[str], cwd: Path, timeout: int = 1800) -> None:
+    code, _, _ = _run(
+        argv, cwd=cwd, timeout=timeout, env=os.environ.copy(), stdout=None, stderr=None
+    )  # type: ignore[arg-type]
+    if code:
+        raise CliError(f"command failed with exit code {code}: {Path(argv[0]).name}")
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    project = Path(
+        args.project_root or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    if not project.is_dir():
+        raise CliError(f"project root does not exist: {project}")
+    root = _install_root(args.scope, project, args.directory)
+    root.mkdir(parents=True, exist_ok=True)
+    # Any attempted runtime mutation invalidates prior browser verification. Removing
+    # markers first also leaves a truthful state after a failed/aborted upgrade.
+    for marker_name in (BROWSER_MARKER, RUNTIME_STATE, ".browser-ready"):
+        (root / marker_name).unlink(missing_ok=True)
+    python = args.python or sys.executable
+    crawl_venv, traf_venv = root / ".venv", root / ".trafilatura-venv"
+    print(f"[crawl4ai] Installing isolated runtimes in {root}")
+    _run_visible([python, "-m", "venv", str(crawl_venv)], project)
+    _run_visible(
+        [str(_exe(crawl_venv, "python")), "-m", "pip", "install", "--upgrade", "pip"],
+        project,
+    )
+    _run_visible(
+        [
+            str(_exe(crawl_venv, "python")),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--requirement",
+            str(REQUIREMENTS_DIR / "crawl4ai.txt"),
+        ],
+        project,
+    )
+    _run_visible([python, "-m", "venv", str(traf_venv)], project)
+    _run_visible(
+        [str(_exe(traf_venv, "python")), "-m", "pip", "install", "--upgrade", "pip"],
+        project,
+    )
+    _run_visible(
+        [
+            str(_exe(traf_venv, "python")),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--requirement",
+            str(REQUIREMENTS_DIR / "trafilatura.txt"),
+        ],
+        project,
+    )
+    crwl, traf = _exe(crawl_venv, "crwl"), _exe(traf_venv, "trafilatura")
+    for executable, check in ((crwl, ["--help"]), (traf, ["--version"])):
+        ready, diagnostic = _probe_executable(executable, check, project, timeout=30)
+        if not ready:
+            raise CliError(f"installation check failed for {executable}: {diagnostic}")
+    identity = _runtime_identity(crwl, traf, project)
+    _write_runtime_state(root, identity)
+    setup = _exe(crawl_venv, "crawl4ai-setup")
+    if args.skip_browser:
+        print(
+            "[crawl4ai] Python packages installed; browser setup was skipped and readiness is NOT verified."
+        )
+        return 2
+    if not setup.is_file():
+        print(
+            "[crawl4ai] WARNING: crawl4ai-setup was not installed; browser readiness is NOT verified.",
+            file=sys.stderr,
+        )
+        return 2
+    print("[crawl4ai] Installing/verifying browser dependencies…")
+    # Keep Crawl4AI setup state inside the selected runtime. Running setup in the
+    # consumer project can otherwise leave a stray project-root global.yml.
+    code, _, err = _run(
+        [str(setup)],
+        cwd=root,
+        timeout=args.browser_timeout,
+        env=_process_env(setup, root),
+        stdout=None,
+        stderr=subprocess.PIPE,
+    )  # type: ignore[arg-type]
+    if code:
+        print(
+            f"[crawl4ai] WARNING: browser setup failed: {err.decode(errors='replace')[-4000:]}",
+            file=sys.stderr,
+        )
+        print(
+            "[crawl4ai] Python packages are installed, but browser readiness is NOT verified."
+        )
+        return 2
+    _write_browser_marker(root, identity)
+    print("[crawl4ai] Crawl4AI + Trafilatura installed. Browser setup verified.")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    project = Path(
+        args.project_root or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    crwl, traf, root = _resolve_tools(project, args.runtime_root)
+    print(f"Plugin CLI: {VERSION}")
+    crawl_ready, crawl_diagnostic = _probe_executable(crwl, ["--help"], project)
+    traf_ready, traf_diagnostic = _probe_executable(traf, ["--version"], project)
+    if crawl_ready and crwl:
+        print(f"Crawl4AI: ready ({crwl})")
+    else:
+        state = "missing" if crawl_diagnostic == "missing" else "broken"
+        print(f"Crawl4AI: {state} ({crawl_diagnostic})")
+    if traf_ready and traf:
+        print(f"Trafilatura: ready ({traf})")
+    else:
+        state = "missing" if traf_diagnostic == "missing" else "broken"
+        print(f"Trafilatura: {state} ({traf_diagnostic})")
+    browser_verified = None
+    if crawl_ready and traf_ready and crwl and traf and root:
+        identity = _runtime_identity(crwl, traf, project)
+        browser_verified = _browser_verification(root, identity)
+    if browser_verified:
+        print(f"Browser: setup last verified {browser_verified}")
+    else:
+        print("Browser: unverified (run the install workflow or smoke test)")
+    print(f"Project: {project}")
+    if not crawl_ready or not traf_ready:
+        print("Run /cc-crawl4ai:crawl4ai-install")
+        return 1
+    return 0 if browser_verified else 2
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    project = Path(
+        args.project_root or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    crwl, traf, root = _resolve_tools(project, args.runtime_root)
+    if not crwl or not traf:
+        raise CliError("Crawl4AI and Trafilatura must both be installed")
+    with (
+        tempfile.NamedTemporaryFile() as crawl_out,
+        tempfile.NamedTemporaryFile() as crawl_err,
+    ):
+        code, _, _ = _run(
+            [
+                str(crwl),
+                "crawl",
+                "-o",
+                "all",
+                "-c",
+                "cache_mode=enabled",
+                "https://example.com",
+            ],
+            cwd=project,
+            timeout=args.timeout,
+            env=_process_env(crwl, project),
+            stdout=crawl_out,
+            stderr=crawl_err,
+        )
+        crawl_out.flush()
+        crawl_err.flush()
+        if code:
+            raise CliError(
+                f"Crawl4AI smoke test failed: {_read_bounded(Path(crawl_err.name))}"
+            )
+        with open(crawl_out.name, encoding="utf-8") as handle:
+            document = json.load(handle)
+        html = document.get("html") if isinstance(document, dict) else None
+        if not isinstance(html, str) or not html.strip():
+            raise CliError("Crawl4AI smoke test returned no HTML")
+    code, out, err = _run(
+        [str(traf), "--output-format", "markdown"],
+        cwd=project,
+        timeout=args.timeout,
+        env=_process_env(traf, project),
+        stdin=html.encode(),
+    )
+    if code or not out.strip():
+        raise CliError(f"Trafilatura smoke test failed: {err.decode(errors='replace')}")
+    if root:
+        identity = _runtime_identity(crwl, traf, project)
+        _write_runtime_state(root, identity)
+        _write_browser_marker(root, identity)
+    print("[crawl4ai] Pipeline smoke test OK")
+    print(out.decode(errors="replace").strip()[:500])
+    return 0
+
+
+def cmd_clear_cache(args: argparse.Namespace) -> int:
+    project = Path(
+        args.project_root or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    base = project / ".crawl4ai"
+    for name in ("cache", "robots"):
+        shutil.rmtree(base / name, ignore_errors=True)
+    print(f"[crawl4ai] Cleared cache and robots data under {base}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="crawl4ai", description=__doc__)
+    parser.add_argument("--version", action="version", version=VERSION)
+    sub = parser.add_subparsers(dest="command", required=True)
+    crawl = sub.add_parser("crawl", help="crawl or extract a URL")
+    crawl.add_argument("url")
+    crawl.add_argument(
+        "--output-format",
+        default="markdown",
+        choices=["markdown", "markdown-fit", "md", "md-fit", "json", "all", "text"],
+    )
+    crawl.add_argument("--extractor", choices=["trafilatura"])
+    crawl.add_argument("--include-links", action="store_true")
+    crawl.add_argument(
+        "--include-formatting", action=argparse.BooleanOptionalAction, default=None
+    )
+    crawl.add_argument("--include-images", action="store_true")
+    crawl.add_argument("--no-tables", action="store_true")
+    crawl.add_argument("--bm25-query")
+    crawl.add_argument("--bm25-threshold", type=float, default=1.0)
+    crawl.add_argument("--deep-crawl", choices=["bfs", "dfs", "best-first"])
+    crawl.add_argument("--max-pages", type=int)
+    crawl.add_argument("--question")
+    crawl.add_argument("--json-extract")
+    crawl.add_argument("--schema-path")
+    crawl.add_argument("--extraction-config")
+    crawl.add_argument("--browser-config")
+    crawl.add_argument("--crawler-config")
+    crawl.add_argument("--bypass-cache", action="store_true")
+    crawl.add_argument("--output-file")
+    crawl.add_argument("--timeout", type=int, default=60)
+    crawl.add_argument("--project-root")
+    crawl.add_argument("--runtime-root")
+    crawl.set_defaults(func=cmd_crawl)
+
+    install = sub.add_parser("install", help="install isolated Python runtimes")
+    install.add_argument(
+        "--scope", choices=["user", "project", "custom"], default="user"
+    )
+    install.add_argument("--directory")
+    install.add_argument("--project-root")
+    install.add_argument("--python")
+    install.add_argument("--skip-browser", action="store_true")
+    install.add_argument("--browser-timeout", type=int, default=1800)
+    install.set_defaults(func=cmd_install)
+    for name, func in (
+        ("status", cmd_status),
+        ("test", cmd_test),
+        ("clear-cache", cmd_clear_cache),
+    ):
+        command = sub.add_parser(name)
+        command.add_argument("--project-root")
+        command.add_argument("--runtime-root")
+        if name == "test":
+            command.add_argument("--timeout", type=int, default=60)
+        command.set_defaults(func=func)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    signal.signal(signal.SIGINT, _terminate_active)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _terminate_active)
+    try:
+        args = build_parser().parse_args(argv)
+        return int(args.func(args))
+    except KeyboardInterrupt:
+        print("[crawl4ai] Interrupted; child process terminated.", file=sys.stderr)
+        return 130
+    except (CliError, OSError, json.JSONDecodeError) as exc:
+        print(f"[crawl4ai] Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
