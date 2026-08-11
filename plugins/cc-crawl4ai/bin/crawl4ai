@@ -14,12 +14,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import IO
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 PROBE_TIMEOUT = 10
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -378,6 +379,81 @@ def filter_bm25(
     return "\n\n".join(selected), len(selected), len(chunks)
 
 
+def normalize_deep_crawl_url(value: str, base_url: str) -> str:
+    """Match Crawl4AI 0.9.2's normalize_url_for_deep_crawl semantics."""
+    parsed = urlparse(urljoin(base_url, value.strip()))
+    parameters = parse_qs(parsed.query)
+    for name in ("utm_source", "utm_medium", "utm_campaign", "ref", "fbclid"):
+        parameters.pop(name, None)
+    query = urlencode(parameters, doseq=True) if parameters else ""
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc.lower(),
+            parsed.path or "/",
+            parsed.params,
+            query,
+            "",
+        )
+    )
+
+
+def parse_deep_crawl_pages(
+    content: str, base_url: str
+) -> tuple[list[dict[str, object]], int]:
+    """Parse and URL-deduplicate Crawl4AI's structured deep-crawl batch."""
+    try:
+        document = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise CliError(
+            f"Crawl4AI deep crawl did not return valid all JSON: {exc}"
+        ) from exc
+    if not isinstance(document, list):
+        raise CliError(
+            "Crawl4AI deep crawl all JSON must contain a list of page records"
+        )
+    pages: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, record in enumerate(document):
+        if not isinstance(record, dict):
+            raise CliError(
+                f"Crawl4AI deep crawl page record {index + 1} is not an object"
+            )
+        url = record.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise CliError(f"Crawl4AI deep crawl page record {index + 1} has no URL")
+        normalized = normalize_deep_crawl_url(url, base_url)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        pages.append(record)
+    return pages, len(document)
+
+
+def serialize_deep_crawl_pages(
+    pages: list[dict[str, object]], output_format: str
+) -> str:
+    """Serialize deduplicated page records in the requested wrapper format."""
+    if output_format == "all":
+        return json.dumps(pages, indent=2, ensure_ascii=False)
+    markdown_key = (
+        "fit_markdown"
+        if output_format in ("markdown-fit", "md-fit")
+        else "raw_markdown"
+    )
+    sections: list[str] = []
+    for index, page in enumerate(pages):
+        url = page.get("url")
+        markdown = page.get("markdown")
+        content = markdown.get(markdown_key) if isinstance(markdown, dict) else None
+        if not isinstance(url, str) or not isinstance(content, str):
+            raise CliError(
+                f"Crawl4AI deep crawl page record {index + 1} has no {markdown_key}"
+            )
+        sections.append(f"\n\n{'=' * 60}\n# {url}\n{'=' * 60}\n\n{content}")
+    return "".join(sections)
+
+
 def _validate_crawl(args: argparse.Namespace) -> None:
     _validate_url(args.url)
     if args.timeout < 1 or args.timeout > 86400:
@@ -466,7 +542,12 @@ def _validate_crawl(args: argparse.Namespace) -> None:
 
 def _build_crwl_args(args: argparse.Namespace, direct_output: Path | None) -> list[str]:
     values = ["crawl"]
-    values += ["-o", "all" if args.extractor == "trafilatura" else args.output_format]
+    upstream_format = (
+        "all"
+        if args.extractor == "trafilatura" or args.deep_crawl
+        else args.output_format
+    )
+    values += ["-o", upstream_format]
     pairs = [
         ("--deep-crawl", args.deep_crawl),
         ("--max-pages", args.max_pages),
@@ -687,7 +768,10 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     direct_output = (
         output
-        if not args.extractor and not args.question and not args.bm25_query
+        if not args.extractor
+        and not args.question
+        and not args.bm25_query
+        and not args.deep_crawl
         else None
     )
     crwl_args = [str(crwl), *_build_crwl_args(args, direct_output)]
@@ -732,6 +816,11 @@ def cmd_crawl(args: argparse.Namespace) -> int:
         content = Path(stdout_file.name).read_text(encoding="utf-8")
     if not content.strip():
         raise CliError("crawl succeeded but produced no content")
+    deep_stats: tuple[int, int] | None = None
+    if args.deep_crawl:
+        pages, total = parse_deep_crawl_pages(content, args.url)
+        content = serialize_deep_crawl_pages(pages, args.output_format)
+        deep_stats = total, len(pages)
     if args.bm25_query:
         content, matched, total = filter_bm25(
             content,
@@ -741,6 +830,10 @@ def cmd_crawl(args: argparse.Namespace) -> int:
         )
         print(f"[crawl4ai] BM25 retained {matched}/{total} structural chunks.")
     output.write_text(content, encoding="utf-8")
+    if deep_stats:
+        print(
+            f"[crawl4ai] Deep crawl returned {deep_stats[0]} page records; saved {deep_stats[1]} unique pages."
+        )
     print(f"[crawl4ai] Full output saved to: {output}")
     return 0
 
@@ -779,11 +872,42 @@ def cmd_install(args: argparse.Namespace) -> int:
         (root / marker_name).unlink(missing_ok=True)
     python = args.python or sys.executable
     crawl_venv, traf_venv = root / ".venv", root / ".trafilatura-venv"
-    print(f"[crawl4ai] Installing isolated runtimes in {root}")
+    started = time.monotonic()
+    total_steps = 7
+    current_step = 0
+
+    def progress(message: str) -> None:
+        nonlocal current_step
+        current_step += 1
+        elapsed = int(time.monotonic() - started)
+        print(
+            f"[crawl4ai] [{current_step}/{total_steps}] {message} (elapsed: {elapsed}s)",
+            flush=True,
+        )
+
+    print(f"[crawl4ai] Installation directory: {root}", flush=True)
+    print(
+        "[crawl4ai] Expected duration: about 5–15 minutes, depending on your internet connection and package cache.",
+        flush=True,
+    )
+    print(
+        "[crawl4ai] Requirements: Python 3.10+, venv, network access, and roughly 2 GB of free disk space.",
+        flush=True,
+    )
+    print(
+        "[crawl4ai] Downloads may exceed 500 MB because Python packages and Chromium browser binaries are installed.",
+        flush=True,
+    )
+
+    progress("Creating the isolated Crawl4AI environment")
     _run_visible([python, "-m", "venv", str(crawl_venv)], project)
+    progress("Updating pip in the Crawl4AI environment")
     _run_visible(
         [str(_exe(crawl_venv, "python")), "-m", "pip", "install", "--upgrade", "pip"],
         project,
+    )
+    progress(
+        "Installing pinned Crawl4AI dependencies; this is usually the longest package step"
     )
     _run_visible(
         [
@@ -797,11 +921,13 @@ def cmd_install(args: argparse.Namespace) -> int:
         ],
         project,
     )
+    progress("Creating the separate Trafilatura environment")
     _run_visible([python, "-m", "venv", str(traf_venv)], project)
     _run_visible(
         [str(_exe(traf_venv, "python")), "-m", "pip", "install", "--upgrade", "pip"],
         project,
     )
+    progress("Installing pinned Trafilatura dependencies")
     _run_visible(
         [
             str(_exe(traf_venv, "python")),
@@ -814,6 +940,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         ],
         project,
     )
+    progress("Verifying the installed command-line tools")
     crwl, traf = _exe(crawl_venv, "crwl"), _exe(traf_venv, "trafilatura")
     for executable, check in ((crwl, ["--help"]), (traf, ["--version"])):
         ready, diagnostic = _probe_executable(executable, check, project, timeout=30)
@@ -833,7 +960,9 @@ def cmd_install(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    print("[crawl4ai] Installing/verifying browser dependencies…")
+    progress(
+        "Installing and verifying browser dependencies; Chromium downloads can take several minutes"
+    )
     # Keep Crawl4AI setup state inside the selected runtime. Running setup in the
     # consumer project can otherwise leave a stray project-root global.yml.
     code, _, err = _run(
@@ -854,7 +983,11 @@ def cmd_install(args: argparse.Namespace) -> int:
         )
         return 2
     _write_browser_marker(root, identity)
-    print("[crawl4ai] Crawl4AI + Trafilatura installed. Browser setup verified.")
+    elapsed = int(time.monotonic() - started)
+    print(
+        f"[crawl4ai] Installation complete in {elapsed}s. Crawl4AI, Trafilatura, and browser setup are verified.",
+        flush=True,
+    )
     return 0
 
 

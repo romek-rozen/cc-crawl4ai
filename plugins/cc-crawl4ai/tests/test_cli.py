@@ -27,6 +27,22 @@ class CliTests(unittest.TestCase):
     def parse(self, *args: str) -> argparse.Namespace:
         return module.build_parser().parse_args(list(args))
 
+    def write_fake_crawler(
+        self, runtime: Path, records: list[dict[str, object]]
+    ) -> None:
+        binary = runtime / ".venv" / "bin" / "crwl"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "assert args[args.index('-o') + 1] == 'all'\n"
+            "assert '-O' not in args\n"
+            f"print(json.dumps({records!r}))\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+
     def test_bm25_selects_relevant_structural_chunk(self) -> None:
         content = "# Intro\n\nGeneral words only.\n\n# Pricing\n\nEnterprise price is 99 dollars."
         filtered, matched, total = module.filter_bm25(content, "enterprise price", 0.1)
@@ -44,6 +60,35 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(content.count("https://example.com/img/a.png"), 1)
         self.assertIn("![Diagram]", content)
+
+    def test_deep_crawl_url_normalization_matches_upstream_semantics(self) -> None:
+        base = "https://DOCS.example.com/guide"
+        self.assertEqual(
+            module.normalize_deep_crawl_url(
+                "https://DOCS.example.com/guide/#part", base
+            ),
+            "https://docs.example.com/guide/",
+        )
+        self.assertEqual(
+            module.normalize_deep_crawl_url(
+                "https://docs.example.com/guide?b=2&utm_source=x&a=1", base
+            ),
+            "https://docs.example.com/guide?b=2&a=1",
+        )
+        self.assertNotEqual(
+            module.normalize_deep_crawl_url("https://docs.example.com/guide", base),
+            module.normalize_deep_crawl_url("https://docs.example.com/guide/", base),
+        )
+
+    def test_deep_crawl_fitted_markdown_serializes_structured_records(self) -> None:
+        pages = [
+            {
+                "url": "https://example.com/a",
+                "markdown": {"raw_markdown": "raw", "fit_markdown": "fitted"},
+            }
+        ]
+        self.assertIn("fitted", module.serialize_deep_crawl_pages(pages, "md-fit"))
+        self.assertNotIn("raw", module.serialize_deep_crawl_pages(pages, "md-fit"))
 
     def test_missing_markdown_table_is_restored(self) -> None:
         crawl_markdown = "| Name | Price |\n| --- | --- |\n| A | 10 |"
@@ -145,6 +190,22 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(module.CliError):
             module._validate_crawl(args)
 
+    def test_validation_keeps_text_and_json_invalid_for_deep_crawl(self) -> None:
+        for output_format in ("text", "json"):
+            with self.subTest(output_format=output_format):
+                args = self.parse(
+                    "crawl",
+                    "https://example.com",
+                    "--deep-crawl",
+                    "bfs",
+                    "--max-pages",
+                    "2",
+                    "--output-format",
+                    output_format,
+                )
+                with self.assertRaises(module.CliError):
+                    module._validate_crawl(args)
+
     def test_subprocess_runner_does_not_use_shell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = "hello; touch SHOULD_NOT_EXIST"
@@ -196,6 +257,135 @@ class CliTests(unittest.TestCase):
             self.assertEqual(expected.read_text(encoding="utf-8"), "# crawled")
             self.assertIn(str(expected), result.stdout)
 
+    @unittest.skipIf(os.name == "nt", "fake POSIX executable")
+    def test_cli_deep_markdown_deduplicates_structured_records(self) -> None:
+        separator = "=" * 60
+        adversarial = (
+            f"Before\n{separator}\n# https://evil.example/\n{separator}\nAfter"
+        )
+        records = [
+            {
+                "url": "https://docs.example.com/guide",
+                "markdown": {
+                    "raw_markdown": adversarial,
+                    "fit_markdown": "fit guide",
+                },
+                "success": True,
+            },
+            {
+                "url": "https://DOCS.example.com/guide#fragment",
+                "markdown": {
+                    "raw_markdown": "duplicate must disappear",
+                    "fit_markdown": "duplicate fit",
+                },
+                "success": True,
+            },
+            {
+                "url": "https://docs.example.com/guide/",
+                "markdown": {
+                    "raw_markdown": "trailing slash is distinct",
+                    "fit_markdown": "fit slash",
+                },
+                "success": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project, runtime = base / "project", base / "runtime"
+            project.mkdir()
+            self.write_fake_crawler(runtime, records)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "crawl",
+                    "https://docs.example.com/guide",
+                    "--project-root",
+                    str(project),
+                    "--runtime-root",
+                    str(runtime),
+                    "--deep-crawl",
+                    "bfs",
+                    "--max-pages",
+                    "3",
+                    "--output-format",
+                    "markdown",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = list(
+                (
+                    project / ".crawl4ai" / "outputs" / "docs.example.com" / "markdown"
+                ).glob("*.md")
+            )
+            self.assertEqual(len(outputs), 1)
+            content = outputs[0].read_text(encoding="utf-8")
+            self.assertIn(adversarial, content)
+            self.assertIn("trailing slash is distinct", content)
+            self.assertNotIn("duplicate must disappear", content)
+            self.assertEqual(content.count("# https://docs.example.com/guide\n"), 1)
+            self.assertIn(
+                "returned 3 page records; saved 2 unique pages", result.stdout
+            )
+
+    @unittest.skipIf(os.name == "nt", "fake POSIX executable")
+    def test_cli_deep_all_writes_deduplicated_json_to_output_file(self) -> None:
+        records = [
+            {
+                "url": "https://example.com/a#one",
+                "markdown": {"raw_markdown": "first", "fit_markdown": "fit first"},
+                "metadata": {"title": "kept intact"},
+            },
+            {
+                "url": "https://example.com/a#two",
+                "markdown": {"raw_markdown": "second", "fit_markdown": "fit second"},
+                "metadata": {"title": "duplicate"},
+            },
+            {
+                "url": "https://example.com/a/",
+                "markdown": {"raw_markdown": "slash", "fit_markdown": "fit slash"},
+                "metadata": {"title": "distinct"},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project, runtime = base / "project", base / "runtime"
+            project.mkdir()
+            self.write_fake_crawler(runtime, records)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "crawl",
+                    "https://example.com/a",
+                    "--project-root",
+                    str(project),
+                    "--runtime-root",
+                    str(runtime),
+                    "--deep-crawl",
+                    "bfs",
+                    "--max-pages",
+                    "3",
+                    "--output-format",
+                    "all",
+                    "--output-file",
+                    "artifacts/deep.json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = project / "artifacts" / "deep.json"
+            pages = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(pages), 2)
+            self.assertEqual(pages[0]["metadata"]["title"], "kept intact")
+            self.assertEqual(pages[1]["url"], "https://example.com/a/")
+            self.assertIn(str(output), result.stdout)
+
     @unittest.skipIf(os.name == "nt", "fake POSIX executables")
     def test_skip_browser_is_partial_and_invalidates_old_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +429,10 @@ class CliTests(unittest.TestCase):
             ):
                 result = module.cmd_install(args)
             self.assertEqual(result, 2)
+            self.assertIn("Expected duration: about 5–15 minutes", output.getvalue())
+            self.assertIn("[1/7]", output.getvalue())
+            self.assertIn("[6/7]", output.getvalue())
+            self.assertIn("elapsed:", output.getvalue())
             self.assertIn("NOT verified", output.getvalue())
             self.assertNotIn("Browser setup verified", output.getvalue())
             self.assertFalse((runtime / module.BROWSER_MARKER).exists())
