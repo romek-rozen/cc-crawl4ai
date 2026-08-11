@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cc-crawl4ai",
   "displayName": "Crawl4AI",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Crawl websites and extract token-efficient content with Crawl4AI and Trafilatura",
   "author": {
     "name": "Roman Rozenberger",

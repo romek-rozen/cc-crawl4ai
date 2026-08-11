@@ -1,2 +1,2 @@
-# Tested by cc-crawl4ai 0.1.1. Update with the compatibility procedure in README.md.
+# Tested by cc-crawl4ai 0.1.2. Update with the compatibility procedure in README.md.
 crawl4ai==0.9.2

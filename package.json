@@ -1,6 +1,6 @@
 {
   "name": "cc-crawl4ai-marketplace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Marketplace and non-MCP Crawl4AI plugin for Claude Code",
   "scripts": {

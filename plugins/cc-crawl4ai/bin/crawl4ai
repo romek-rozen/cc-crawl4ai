@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import IO
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 MAX_DIAGNOSTIC_BYTES = 64 * 1024
 PROBE_TIMEOUT = 10
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]

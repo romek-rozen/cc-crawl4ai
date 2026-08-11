@@ -237,7 +237,7 @@ Argparse usage errors also use `2`; distinguish them from the install command's 
 
 ## Compatibility and platform notes
 
-- Requirements comments and tests bind plugin `0.1.1` to Crawl4AI `0.9.2` and Trafilatura `2.2.0`.
+- Requirements comments and tests bind plugin `0.1.2` to Crawl4AI `0.9.2` and Trafilatura `2.2.0`.
 - The repository does not publish an npm package. Node/npm are needed only for repository convenience scripts.
 - Browser availability depends on upstream Crawl4AI setup and host OS packages. A Python-only installation is not browser-ready.
 - POSIX systems receive process-group termination on timeout/interruption. Windows uses direct process termination; POSIX-specific tests are skipped there.

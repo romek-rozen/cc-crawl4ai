@@ -1,6 +1,6 @@
 # cc-crawl4ai
 
-[![GitHub release](https://img.shields.io/badge/version-0.1.1-blue)](https://github.com/romek-rozen/cc-crawl4ai)
+[![GitHub release](https://img.shields.io/badge/version-0.1.2-blue)](https://github.com/romek-rozen/cc-crawl4ai)
 [![GitHub license](https://img.shields.io/github/license/romek-rozen/cc-crawl4ai)](LICENSE)
 [![Built with Crawl4AI](https://img.shields.io/badge/Built%20with-Crawl4AI-blue)](https://github.com/unclecode/crawl4ai)
 [![Built with Trafilatura](https://img.shields.io/badge/Built%20with-Trafilatura-orange)](https://github.com/adbar/trafilatura)
@@ -10,6 +10,38 @@
 A native [Claude Code](https://github.com/anthropics/claude-code) plugin for crawling live websites with [Crawl4AI](https://github.com/unclecode/crawl4ai) and extracting compact Markdown or text with [Trafilatura](https://trafilatura.readthedocs.io/).
 
 `cc-crawl4ai` gives Claude Code one crawling skill, four runtime-management skills, three specialized agents, and a bundled Python command-line runner. It is deliberately **not an MCP server**: Claude invokes a local executable through Bash, and the executable launches pinned Crawl4AI and Trafilatura tools without a shell.
+
+## Why: spend fewer agent tokens on web pages
+
+Web pages rendered for browsers contain navigation, repeated menus, cookie/UI text, scripts, styling remnants, and other boilerplate that an AI agent usually does not need. Sending all of it into an agent's context wastes tokens, increases cost, and leaves less context for reasoning and source code.
+
+The primary goal of `cc-crawl4ai` is to **extract the useful page content before Claude reads it**. Crawl4AI renders the page, Trafilatura removes boilerplate locally, optional BM25 keeps only query-relevant sections, and the plugin returns an artifact path instead of injecting the entire crawl into the conversation.
+
+### Real example
+
+For [Claude Code's features overview](https://code.claude.com/docs/en/features-overview), the same page produced:
+
+| Mode | Output size | Words | Approx. tokens¹ | Reduction vs. regular Markdown |
+| --- | ---: | ---: | ---: | ---: |
+| Crawl4AI Markdown | 33,971 bytes | 3,959 | ~8,465 | baseline |
+| Crawl4AI + Trafilatura Markdown | 14,340 bytes | 2,243 | ~3,574 | **57.8% fewer** |
+| Crawl4AI + Trafilatura text | 13,154 bytes | 1,898 | ~3,277 | **61.3% fewer** |
+
+That is roughly **5,200 fewer tokens for one page** in compact text mode. Savings vary by site: content-heavy pages may shrink less, while pages with extensive navigation and boilerplate may shrink considerably more. BM25 filtering can reduce the artifact further when the agent needs only one topic from a long document.
+
+¹ Approximation based on four characters per token; exact token counts depend on the model tokenizer and content. Measurements include the saved extraction output, not raw HTML.
+
+Use it naturally:
+
+```text
+Read https://code.claude.com/docs/en/features-overview with Trafilatura and summarize the useful content.
+```
+
+Or request the smallest representation:
+
+```text
+Read https://code.claude.com/docs/en/features-overview as compact plain text to minimize agent tokens.
+```
 
 ## What it does
 
@@ -30,7 +62,7 @@ A native [Claude Code](https://github.com/anthropics/claude-code) plugin for cra
 - About **2 GB of free disk space** for isolated environments and browser binaries.
 - A separately configured Crawl4AI LLM provider only for question mode and LLM JSON extraction.
 
-The pinned compatibility set for plugin `0.1.1` is Crawl4AI `0.9.2` and Trafilatura `2.2.0`. The runner handles POSIX and Windows virtual-environment layouts/process termination, but its process-group tests are POSIX-only and browser availability still depends on upstream host support. See [Installation](docs/INSTALLATION.md#compatibility-and-platform-notes).
+The pinned compatibility set for plugin `0.1.2` is Crawl4AI `0.9.2` and Trafilatura `2.2.0`. The runner handles POSIX and Windows virtual-environment layouts/process termination, but its process-group tests are POSIX-only and browser availability still depends on upstream host support. See [Installation](docs/INSTALLATION.md#compatibility-and-platform-notes).
 
 ## Install
 

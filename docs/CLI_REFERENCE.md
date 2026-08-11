@@ -18,7 +18,7 @@ From a checkout:
 python3 plugins/cc-crawl4ai/bin/crawl4ai --help
 ```
 
-Current runner version: `0.1.1`.
+Current runner version: `0.1.2`.
 
 ## Common path resolution
 
