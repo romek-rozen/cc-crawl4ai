@@ -83,6 +83,8 @@ Formats:
 
 `json` is reserved by this runner for structured extraction and is rejected without a complete extraction strategy. `text` requires Trafilatura.
 
+Formats differ substantially in how many context tokens the result costs. Ordered from largest to smallest for the same page: `markdown`, `markdown-fit`, Trafilatura `markdown`, Trafilatura `text`. Pick the smallest format that still carries the structure you need — use Trafilatura `text` when only prose matters, and keep Markdown when headings, tables, or links are part of the answer. See the [measured benchmark](https://github.com/romek-rozen/cc-crawl4ai#why-spend-fewer-agent-tokens-on-web-pages).
+
 ### Upstream browser/crawler parameters
 
 Despite their wrapper names, `--browser-config` and `--crawler-config` accept Crawl4AI 0.9.2's comma-separated direct parameter strings; they are not file paths:

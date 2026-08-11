@@ -2,7 +2,7 @@
 
 `cc-crawl4ai` is a native Claude Code plugin for crawling with [Crawl4AI](https://github.com/unclecode/crawl4ai) and compact local extraction with [Trafilatura](https://trafilatura.readthedocs.io/). It provides namespaced skills, specialized agents, and a bundled Python runner. It does **not** use MCP.
 
-Its main purpose is to save agent context tokens: pages are rendered and stripped of navigation and boilerplate before Claude reads them, while large results remain in artifacts. In a real test on [Claude Code's features overview](https://code.claude.com/docs/en/features-overview), compact Trafilatura text reduced the saved content from about 8,465 to 3,277 estimated tokens—a **61.3% reduction**. See the [full benchmark and methodology](https://github.com/romek-rozen/cc-crawl4ai#why-spend-fewer-agent-tokens-on-web-pages).
+Its main purpose is to save agent context tokens: pages are rendered and stripped of navigation and boilerplate before Claude reads them, while large results remain in artifacts. In a measured test on [Claude Code's features overview](https://code.claude.com/docs/en/features-overview), compact Trafilatura text reduced the saved content from 8,269 to 2,805 tokens—a **66.1% reduction**. See the [full benchmark and methodology](https://github.com/romek-rozen/cc-crawl4ai#why-spend-fewer-agent-tokens-on-web-pages).
 
 This README stays with marketplace-installed copies. The canonical, versioned manuals are:
 

@@ -19,17 +19,30 @@ The primary goal of `cc-crawl4ai` is to **extract the useful page content before
 
 ### Real example
 
-For [Claude Code's features overview](https://code.claude.com/docs/en/features-overview), the same page produced:
+[Claude Code's features overview](https://code.claude.com/docs/en/features-overview) is served as **503,770 bytes of raw HTML**. Each output mode turns that same page into:
 
-| Mode | Output size | Words | Approx. tokens¹ | Reduction vs. regular Markdown |
+| Mode | Output size | Words | Tokens¹ | Reduction vs. regular Markdown |
 | --- | ---: | ---: | ---: | ---: |
-| Crawl4AI Markdown | 33,971 bytes | 3,959 | ~8,465 | baseline |
-| Crawl4AI + Trafilatura Markdown | 14,340 bytes | 2,243 | ~3,574 | **57.8% fewer** |
-| Crawl4AI + Trafilatura text | 13,154 bytes | 1,898 | ~3,277 | **61.3% fewer** |
+| Crawl4AI Markdown | 33,971 bytes | 3,959 | 8,269 | baseline |
+| Crawl4AI fitted Markdown (`markdown-fit`) | 24,963 bytes | 3,549 | 5,675 | **31.4% fewer** |
+| Crawl4AI + Trafilatura Markdown | 14,340 bytes | 2,243 | 3,255 | **60.6% fewer** |
+| Crawl4AI + Trafilatura text | 13,154 bytes | 1,898 | 2,805 | **66.1% fewer** |
 
-That is roughly **5,200 fewer tokens for one page** in compact text mode. Savings vary by site: content-heavy pages may shrink less, while pages with extensive navigation and boilerplate may shrink considerably more. BM25 filtering can reduce the artifact further when the agent needs only one topic from a long document.
+That is roughly **5,500 fewer tokens for one page** in compact text mode. The fitted-Markdown row is the honest intermediate baseline: Crawl4AI's own heuristic filter already removes some boilerplate, and Trafilatura roughly doubles that saving. Results vary by site — content-heavy pages shrink less, and pages with extensive navigation shrink more. BM25 filtering can reduce the artifact further when the agent needs only one topic from a long document.
 
-¹ Approximation based on four characters per token; exact token counts depend on the model tokenizer and content. Measurements include the saved extraction output, not raw HTML.
+¹ **Methodology.** Counted with the `cl100k_base` tokenizer as a portable proxy; Claude's tokenizer differs, so treat these as indicative rather than exact. Sizes are the bytes of the saved artifact, so they exclude the raw HTML that never reaches the conversation. The common four-characters-per-token rule of thumb *understates* the benefit here (it estimates 57.8% and 61.3%), because boilerplate-free prose packs more characters per token — 4.09 chars/token for regular Markdown versus 4.67 for Trafilatura text.
+
+Reproduce it with plugin `0.1.2`, Crawl4AI `0.9.2`, and Trafilatura `2.2.0` (measured 2026-08-11):
+
+```bash
+URL=https://code.claude.com/docs/en/features-overview
+crawl4ai crawl "$URL" --output-format markdown --bypass-cache
+crawl4ai crawl "$URL" --output-format markdown-fit --bypass-cache
+crawl4ai crawl "$URL" --extractor trafilatura --output-format markdown --bypass-cache
+crawl4ai crawl "$URL" --extractor trafilatura --output-format text --bypass-cache
+```
+
+Live pages change over time, so absolute numbers drift; the ordering of the modes is the durable result.
 
 Use it naturally:
 
