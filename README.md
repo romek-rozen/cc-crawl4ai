@@ -1,6 +1,6 @@
 # cc-crawl4ai
 
-[![GitHub release](https://img.shields.io/badge/version-0.1.2-blue)](https://github.com/romek-rozen/cc-crawl4ai)
+[![GitHub release](https://img.shields.io/badge/version-0.1.3-blue)](https://github.com/romek-rozen/cc-crawl4ai)
 [![GitHub license](https://img.shields.io/github/license/romek-rozen/cc-crawl4ai)](LICENSE)
 [![Built with Crawl4AI](https://img.shields.io/badge/Built%20with-Crawl4AI-blue)](https://github.com/unclecode/crawl4ai)
 [![Built with Trafilatura](https://img.shields.io/badge/Built%20with-Trafilatura-orange)](https://github.com/adbar/trafilatura)
@@ -75,7 +75,7 @@ Read https://code.claude.com/docs/en/features-overview as compact plain text to 
 - About **2 GB of free disk space** for isolated environments and browser binaries.
 - A separately configured Crawl4AI LLM provider only for question mode and LLM JSON extraction.
 
-The pinned compatibility set for plugin `0.1.2` is Crawl4AI `0.9.2` and Trafilatura `2.2.0`. The runner handles POSIX and Windows virtual-environment layouts/process termination, but its process-group tests are POSIX-only and browser availability still depends on upstream host support. See [Installation](docs/INSTALLATION.md#compatibility-and-platform-notes).
+The pinned compatibility set for plugin `0.1.3` is Crawl4AI `0.9.4` and Trafilatura `2.2.0`. The runner handles POSIX and Windows virtual-environment layouts/process termination, but its process-group tests are POSIX-only and browser availability still depends on upstream host support. See [Installation](docs/INSTALLATION.md#compatibility-and-platform-notes).
 
 ## Install
 
@@ -182,7 +182,7 @@ Claude Code
     ├── skills/                 routing and managed workflows
     ├── agents/                 scrape, deep-crawl, extraction specialists
     └── bin/crawl4ai            validation and orchestration
-        ├── crwl subprocess     Crawl4AI 0.9.2
+        ├── crwl subprocess     Crawl4AI 0.9.4
         ├── trafilatura process Trafilatura 2.2.0 (optional)
         └── local BM25 filter   no external model (optional)
 ```

@@ -20,7 +20,7 @@ This README stays with marketplace-installed copies. The canonical, versioned ma
 - Network access and Crawl4AI browser/OS dependencies
 - A Crawl4AI-supported provider only for question and LLM extraction modes
 
-Plugin `0.1.2` pins Crawl4AI `0.9.2` and Trafilatura `2.2.0` in separate virtual environments.
+Plugin `0.1.3` pins Crawl4AI `0.9.4` and Trafilatura `2.2.0` in separate virtual environments.
 
 ## Install
 

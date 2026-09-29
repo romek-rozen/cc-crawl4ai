@@ -87,7 +87,7 @@ Formats differ substantially in how many context tokens the result costs. Ordere
 
 ### Upstream browser/crawler parameters
 
-Despite their wrapper names, `--browser-config` and `--crawler-config` accept Crawl4AI 0.9.2's comma-separated direct parameter strings; they are not file paths:
+Despite their wrapper names, `--browser-config` and `--crawler-config` accept Crawl4AI 0.9.4's comma-separated direct parameter strings; they are not file paths:
 
 ```bash
 --browser-config "headless=true,viewport_width=1280"
@@ -96,7 +96,7 @@ Despite their wrapper names, `--browser-config` and `--crawler-config` accept Cr
 
 The runner passes these as upstream `crwl -b` and `crwl -c`. When cache is not bypassed, it adds `cache_mode=enabled` unless that key already appears in the crawler string. With the current runner, `--bypass-cache` forwards Crawl4AI's bypass flag and does not forward a supplied `--crawler-config`; do not combine them when other crawler parameters are required.
 
-Parameter names and accepted values are interpreted by pinned Crawl4AI, so verify advanced parameters against Crawl4AI 0.9.2 rather than a newer upstream release.
+Parameter names and accepted values are interpreted by pinned Crawl4AI, so verify advanced parameters against Crawl4AI 0.9.4 rather than a newer upstream release.
 
 ## Bounded multi-page crawling
 
@@ -118,9 +118,9 @@ Every deep crawl must choose a strategy and set a positive page cap:
 | `dfs` | Follow branches more deeply. |
 | `best-first` | Let Crawl4AI prioritize more relevant links. |
 
-Deep crawl supports Markdown, fitted Markdown, or `all`. It cannot be combined with Trafilatura, BM25, question mode, or either structured extraction strategy. The wrapper always obtains Crawl4AI's structured `all` batch, removes duplicate page records using Crawl4AI 0.9.2's normalized-URL semantics, and then writes the requested format. URL fragments do not distinguish pages, while a trailing slash does.
+Deep crawl supports Markdown, fitted Markdown, or `all`. It cannot be combined with Trafilatura, BM25, question mode, or either structured extraction strategy. The wrapper always obtains Crawl4AI's structured `all` batch, removes duplicate page records using Crawl4AI 0.9.4's normalized-URL semantics, and then writes the requested format. URL fragments do not distinguish pages, while a trailing slash does.
 
-`--max-pages` limits the upstream batch, not the number of unique records after wrapper deduplication. Crawl4AI 0.9.2 can return the seed more than once, and each duplicate still consumes an upstream batch slot. The wrapper reports both the returned record count and the unique saved count; it does not launch extra crawls or fabricate records to fill the requested cap. Increase the cap conservatively if the unique result is smaller than requested.
+`--max-pages` limits the upstream batch, not the number of unique records after wrapper deduplication. Crawl4AI can return the seed more than once, and each duplicate still consumes an upstream batch slot. The wrapper reports both the returned record count and the unique saved count; it does not launch extra crawls or fabricate records to fill the requested cap. Increase the cap conservatively if the unique result is smaller than requested.
 
 ## Question mode
 
@@ -187,7 +187,7 @@ This mode uses two files supported by the pinned Crawl4AI CLI and does not requi
 type: json-css
 ```
 
-For CSS/XPath in Crawl4AI 0.9.2, the config's `type` chooses the strategy and the separate schema carries selectors/fields.
+For CSS/XPath in Crawl4AI 0.9.4, the config's `type` chooses the strategy and the separate schema carries selectors/fields.
 
 Invocation:
 
@@ -200,7 +200,7 @@ Invocation:
   --extraction-config "/absolute/path/extract-css.yaml"
 ```
 
-For XPath, use `type: json-xpath` and a schema whose `baseSelector`/field selectors are XPath expressions accepted by Crawl4AI 0.9.2. The runner only checks that both options are present and forwards them; the upstream CLI loads and validates file existence/content. CSS/XPath extraction cannot be combined with LLM extraction, question, BM25, Trafilatura, or deep crawl.
+For XPath, use `type: json-xpath` and a schema whose `baseSelector`/field selectors are XPath expressions accepted by Crawl4AI 0.9.4. The runner only checks that both options are present and forwards them; the upstream CLI loads and validates file existence/content. CSS/XPath extraction cannot be combined with LLM extraction, question, BM25, Trafilatura, or deep crawl.
 
 Do not put provider tokens into deterministic extraction configuration. Although Crawl4AI's config format also supports `type: llm`, this runner's documented LLM path is `--json-extract`, which keeps the two accepted runner strategies unambiguous.
 

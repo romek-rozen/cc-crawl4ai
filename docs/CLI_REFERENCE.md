@@ -18,7 +18,7 @@ From a checkout:
 python3 plugins/cc-crawl4ai/bin/crawl4ai --help
 ```
 
-Current runner version: `0.1.2`.
+Current runner version: `0.1.3`.
 
 ## Common path resolution
 
@@ -94,7 +94,7 @@ BM25 accepts Markdown/aliases/fitted Markdown or Trafilatura text. It reports `r
 | `--deep-crawl STRATEGY` | none | `bfs`, `dfs`, or `best-first`. |
 | `--max-pages INTEGER` | none | Required positive bound whenever deep crawling is selected. |
 
-Deep crawling accepts Markdown, fitted Markdown, or `all` only. The runner requests structured upstream `all` JSON for every deep crawl, deduplicates page records by Crawl4AI 0.9.2 normalized URL (fragments removed; trailing slashes preserved), and serializes the requested format. `--max-pages` caps records returned by upstream before deduplication, so the saved unique count can be lower when the upstream batch contains duplicates. The runner reports that count truthfully and does not crawl extra pages to fill the cap.
+Deep crawling accepts Markdown, fitted Markdown, or `all` only. The runner requests structured upstream `all` JSON for every deep crawl, deduplicates page records by Crawl4AI 0.9.4 normalized URL (fragments removed; trailing slashes preserved), and serializes the requested format. `--max-pages` caps records returned by upstream before deduplication, so the saved unique count can be lower when the upstream batch contains duplicates. The runner reports that count truthfully and does not crawl extra pages to fill the cap.
 
 ### Question and extraction options
 

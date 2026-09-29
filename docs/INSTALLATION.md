@@ -28,7 +28,7 @@ Package manager and browser download output is also streamed to the terminal. At
 
 The plugin installs exactly:
 
-- `crawl4ai==0.9.2`
+- `crawl4ai==0.9.4`
 - `trafilatura==2.2.0`
 
 They use separate virtual environments because their transitive dependencies, notably `lxml`, can conflict. Do not combine the environments.
@@ -237,7 +237,7 @@ Argparse usage errors also use `2`; distinguish them from the install command's 
 
 ## Compatibility and platform notes
 
-- Requirements comments and tests bind plugin `0.1.2` to Crawl4AI `0.9.2` and Trafilatura `2.2.0`.
+- Requirements comments and tests bind plugin `0.1.3` to Crawl4AI `0.9.4` and Trafilatura `2.2.0`.
 - The repository does not publish an npm package. Node/npm are needed only for repository convenience scripts.
 - Browser availability depends on upstream Crawl4AI setup and host OS packages. A Python-only installation is not browser-ready.
 - POSIX systems receive process-group termination on timeout/interruption. Windows uses direct process termination; POSIX-specific tests are skipped there.

@@ -109,7 +109,7 @@ Rerun installation without `--skip-browser`, then smoke-test:
 /cc-crawl4ai:crawl4ai-test
 ```
 
-Some Linux hosts need system packages that Python/pip cannot supply. Follow the setup guidance for pinned Crawl4AI `0.9.2` and the host distribution. Do not manually create `.browser-ready.json`; it is fingerprinted to executable paths and package versions.
+Some Linux hosts need system packages that Python/pip cannot supply. Follow the setup guidance for pinned Crawl4AI `0.9.4` and the host distribution. Do not manually create `.browser-ready.json`; it is fingerprinted to executable paths and package versions.
 
 ## Browser setup times out
 
@@ -183,11 +183,11 @@ accept comma-separated direct Crawl4AI parameters, not YAML/JSON file paths. For
 --crawler-config "delay_before_return_html=2,cache_mode=enabled"
 ```
 
-They are interpreted by Crawl4AI `0.9.2`. Parameters copied from newer Crawl4AI documentation may not exist in the pinned version.
+They are interpreted by Crawl4AI `0.9.4`. Parameters copied from newer Crawl4AI documentation may not exist in the pinned version.
 
 ## LLM question or extraction fails
 
-`--question` and `--json-extract` delegate provider use to Crawl4AI. Configure a provider/token supported by Crawl4AI `0.9.2` and verify its model/network access. The plugin does not provide a model credential or MCP proxy.
+`--question` and `--json-extract` delegate provider use to Crawl4AI. Configure a provider/token supported by Crawl4AI `0.9.4` and verify its model/network access. The plugin does not provide a model credential or MCP proxy.
 
 To avoid provider requirements, use:
 

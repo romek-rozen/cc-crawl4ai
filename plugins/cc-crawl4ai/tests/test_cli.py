@@ -420,7 +420,7 @@ class CliTests(unittest.TestCase):
                     return_value={
                         "crwl": str(crawl),
                         "trafilatura": str(traf),
-                        "crawl4ai": "0.9.2",
+                        "crawl4ai": "0.9.4",
                         "trafilatura_version": "2.2.0",
                         "fingerprint": "new",
                     },
@@ -669,7 +669,7 @@ class CliTests(unittest.TestCase):
 
     def test_requirements_are_exactly_pinned(self) -> None:
         expected = {
-            "crawl4ai.txt": "crawl4ai==0.9.2",
+            "crawl4ai.txt": "crawl4ai==0.9.4",
             "trafilatura.txt": "trafilatura==2.2.0",
         }
         for filename, requirement in expected.items():
